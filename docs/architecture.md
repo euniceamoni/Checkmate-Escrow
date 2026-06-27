@@ -126,6 +126,43 @@ Returned by `get_match(match_id)`. All fields below are stable and safe to read.
 | `get_pending_matches` | `() -> Vec<Match>` | Returns pending matches currently in `Pending` state, awaiting deposit completion. |
 | `get_active_matches` | `() -> Vec<Match>` | Returns active matches currently in `Active` state, fully funded and ready for result submission. |
 
+## Balance Snapshots
+
+At each key lifecycle transition, the contract records a `BalanceSnapshot` — a point-in-time audit record of the escrowed balance for a match.
+
+### When snapshots are taken
+
+| `SnapshotReason` | Triggering function |
+|------------------|---------------------|
+| `Created`        | `create_match`      |
+| `Deposit`        | `deposit` (once per player) |
+| `Completed`      | `submit_result`     |
+| `Cancelled`      | `cancel_match` / `expire_match` |
+
+A normal match lifecycle therefore produces exactly 4 snapshots: `Created` → `Deposit` (player 1) → `Deposit` (player 2) → `Completed` or `Cancelled`.
+
+### Ring-buffer storage
+
+Snapshots are stored in a fixed-size ring buffer with a capacity of **`MAX_SNAPSHOTS_PER_MATCH = 8`** slots per match. The storage key for each slot is `DataKey::Snapshot(match_id, slot)`, where:
+
+```
+slot = snapshot_index % MAX_SNAPSHOTS_PER_MATCH
+```
+
+When more than 8 snapshots are recorded (e.g. due to future lifecycle extensions), the oldest slot is overwritten. The total number of snapshots ever recorded is kept separately under `DataKey::SnapshotCount(match_id)` and never resets.
+
+### Interpreting the `index` field
+
+Each `BalanceSnapshot` carries a monotonically increasing `index` — its position in the full chronological sequence for that match (0-based). When reading snapshots via `get_balance_snapshots`, callers can use `index` to:
+
+- **Order** snapshots chronologically (ascending `index`).
+- **Detect gaps** caused by ring-buffer wrap-around: if the oldest snapshot returned has `index > 0` and `index >= MAX_SNAPSHOTS_PER_MATCH`, earlier snapshots have been overwritten.
+- **Correlate** a snapshot with the `match.snapshot` contract event, which emits `(match_id, index, escrow_balance)`.
+
+### Access control
+
+`get_balance_snapshots` requires the caller to be the contract admin (receives full snapshot data) or one of the two matched players (receives snapshots with token amounts redacted). Any other caller receives `Unauthorized`.
+
 ## Index Behavior, TTL Caveats, and Pagination
 
 ### Player-Match Index (`get_player_matches`)
